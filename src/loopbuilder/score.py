@@ -5,7 +5,6 @@ from loopbuilder.segment import SegmentModel
 
 
 class SegmentModelEvaluatorBase:
-
     __default_parameters = {}
 
     def __init__(self, identifier: str | None = None, **kwargs: Any):

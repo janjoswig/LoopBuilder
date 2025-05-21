@@ -15,9 +15,12 @@ class Builder(ABC):
     """Base class for loop builders"""
 
     def __init__(
-        self, structure: StrPath, output_directory: StrPath,
+        self,
+        structure: StrPath,
+        output_directory: StrPath,
         working_directory: StrPath | None = None,
-        scorers: list[Scorer] | None = None, filters: list[Filter] | None = None
+        scorers: list[Scorer] | None = None,
+        filters: list[Filter] | None = None,
     ):
         """Initialize the builder
 
@@ -72,7 +75,7 @@ class Builder(ABC):
                 residue_index_offset=int(next(chains[chain_index].residues()).id),
                 residue_names=residue_names,
                 parent_structure_file=self.structure,
-                models=[]
+                models=[],
             )
             self.segments.append(segment)
 
@@ -173,7 +176,6 @@ class Builder(ABC):
 
 
 class PDBFixerBuilder(Builder):
-
     def build_segment(self, segment: Segment, trial_id: str, working_directory: pathlib.Path) -> SegmentModel:
         """Build a segment model using PDBFixer
 
@@ -185,17 +187,17 @@ class PDBFixerBuilder(Builder):
             A `SegmentModel` object
         """
 
-
         fixer = PDBFixer(str(segment.parent_structure_file))
-        fixer.findMissingResidues = {
-            (segment.chain_index, segment.residue_start_index): segment.residue_names
-        }
+        fixer.findMissingResidues = {(segment.chain_index, segment.residue_start_index): segment.residue_names}
 
         fixer.findMissingAtoms()
         fixer.addMissingAtoms()
 
-        model_structure_file = working_directory / f"{segment.parent_structure_file}_segment_{segment.chain_index}_{segment.residue_start_index}_{trial_id}.cif"
-        with open(model_structure_file, 'w') as fp:
+        model_structure_file = (
+            working_directory
+            / f"{segment.parent_structure_file}_segment_{segment.chain_index}_{segment.residue_start_index}_{trial_id}.cif"
+        )
+        with open(model_structure_file, "w") as fp:
             PDBxFile.writeFile(fixer.topology, fixer.positions, file=fp, keepIds=True)
 
         return SegmentModel(identifier=segment.identifier, structure_file=model_structure_file, scores={})
