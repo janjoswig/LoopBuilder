@@ -16,16 +16,17 @@ class Builder(ABC):
 
     def __init__(
         self,
-        structure: StrPath,
+        structure_file: StrPath,
         output_directory: StrPath,
         working_directory: StrPath | None = None,
         scorers: list[Scorer] | None = None,
         filters: list[Filter] | None = None,
+        progress_bar: bool = True,
     ):
         """Initialize the builder
 
         Args:
-            structure: Path to the input structure file
+            structure_file: Path to the input structure file
             output_directory: Path to the output directory. Successful models will be saved here.
 
         Keyword args:
@@ -33,25 +34,29 @@ class Builder(ABC):
                 will be saved here. If `None`, uses a temporary working directory.
             scorers: List of scorers to use (optional)
             filters: List of filters to use (optional)
+            progress_bar: Show a progress bar for the model building process
         """
         if working_directory is not None:
             working_directory = pathlib.Path(working_directory).resolve()
         self.working_directory = working_directory
-        self.structure = pathlib.Path(structure).resolve()
+        self.structure_file = pathlib.Path(structure_file).resolve()
         self.output_directory = pathlib.Path(output_directory).resolve()
         self.scorers = scorers or []
         self.filters = filters or []
         self.segments: list[Segment] = []
+        self.progress_bar = progress_bar
 
     def find_segments(self) -> None:
         """Find missing segments in the input structure
 
         NOTE: Uses PDBFixer at the moment but this part can also be
             implemented for example in Biopython if needed.
+
+        NOTE: Ignores missing terminal residues
         """
 
         self.segments = []
-        fixer = PDBFixer(filename=str(self.structure))
+        fixer = PDBFixer(filename=str(self.structure_file))
         fixer.findMissingResidues()
 
         chains = list(fixer.topology.chains())
@@ -74,7 +79,7 @@ class Builder(ABC):
                 residue_start_index=residue_start_index,
                 residue_index_offset=int(next(chains[chain_index].residues()).id),
                 residue_names=residue_names,
-                parent_structure_file=self.structure,
+                parent_structure_file=self.structure_file,
                 models=[],
             )
             self.segments.append(segment)
@@ -111,15 +116,19 @@ class Builder(ABC):
             logger.warning("Using 0 trial models. Exiting.")
             return
 
-        logger.info(f"Building n={n} models for {self.structure} (max_tries={max_tries})")
+        logger.info(f"Building n={n} models for {self.structure_file} (max_tries={max_tries})")
         self.output_directory.mkdir(parents=True, exist_ok=True)
         logger.info(f"Saving output to {self.output_directory}")
 
         scorer_str = "\n".join([f"  {scorer!r}" for scorer in self.scorers])
-        logger.info(f"Using {len(self.scorers)} scorers\n{scorer_str}")
+        if scorer_str:
+            scorer_str = ":\n" + scorer_str
+        logger.info(f"Using {len(self.scorers)} scorers{scorer_str}")
 
         filter_str = "\n".join([f"  {filter!r}" for filter in self.filters])
-        logger.info(f"Using {len(self.filters)} filters\n{filter_str}")
+        if filter_str:
+            filter_str = ":\n" + filter_str
+        logger.info(f"Using {len(self.filters)} filters{filter_str}")
 
         if not self.segments:
             logger.info("Looking for segments")
@@ -131,32 +140,43 @@ class Builder(ABC):
 
         logger.info(f"Found {len(self.segments)} segments")
 
-        for segment in tqdm(self.segments):
+        if self.progress_bar:
+            it_segments = tqdm(self.segments, desc="Building segments", unit="segment")
+        else:
+            it_segments = self.segments
+
+        for segment in it_segments:
             logger.info(f"Building models for segment {segment.identifier}")
             n_success = 0
             n_tries = 0
 
-            if n_success >= n:
-                logger.success(f"Reached the target number of models (success_rate={n_success / n_tries:.2%})")
-                break
+            while True:
+                if n_success >= n:
+                    logger.success(f"Reached the target number of models (success_rate={n_success / n_tries:.2%})")
+                    break
 
-            if n_tries >= max_tries:
-                logger.warning(f"Reached the maximum number of tries (success_rate={n_success / n_tries:.2%})")
-                break
+                if n_tries >= max_tries:
+                    logger.warning(f"Reached the maximum number of tries (success_rate={n_success / n_tries:.2%})")
+                    break
 
-            segment_model = self.build_segment(segment, trial_id=str(n_tries), working_directory=working_directory)
-            n_tries += 1
+                segment_model = self.build_segment(segment, trial_id=str(n_tries), working_directory=working_directory)
+                n_tries += 1
 
-            for scorer in self.scorers:
-                scorer.score(segment_model)
+                for scorer in self.scorers:
+                    scorer.score(segment_model)
 
-            for filter in self.filters:
-                if not filter.filter(segment_model):
-                    continue
+                for filter in self.filters:
+                    if not filter.filter(segment_model):
+                        continue
 
-            n_success += 1
-            segment.models.append(segment_model)
-            logger.success(f"Built model {n_success} for segment {segment.identifier}")
+                n_success += 1
+                model_structure_file = (
+                    self.output_directory / f"{segment.parent_structure_file.stem}_{segment.identifier}_{n_success}.cif"
+                )
+                segment_model.structure_file.rename(model_structure_file)
+                segment_model.structure_file = model_structure_file
+                segment.models.append(segment_model)
+                logger.success(f"Built model {n_success} for segment {segment.identifier}")
 
         return self.segments
 
@@ -188,14 +208,13 @@ class PDBFixerBuilder(Builder):
         """
 
         fixer = PDBFixer(str(segment.parent_structure_file))
-        fixer.findMissingResidues = {(segment.chain_index, segment.residue_start_index): segment.residue_names}
+        fixer.missingResidues = {(segment.chain_index, segment.residue_start_index): segment.residue_names}
 
         fixer.findMissingAtoms()
         fixer.addMissingAtoms()
 
         model_structure_file = (
-            working_directory
-            / f"{segment.parent_structure_file}_segment_{segment.chain_index}_{segment.residue_start_index}_{trial_id}.cif"
+            working_directory / f"{segment.parent_structure_file.stem}_{segment.identifier}_{trial_id}.cif"
         )
         with open(model_structure_file, "w") as fp:
             PDBxFile.writeFile(fixer.topology, fixer.positions, file=fp, keepIds=True)
