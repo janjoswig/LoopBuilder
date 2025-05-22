@@ -219,11 +219,14 @@ class Builder(ABC):
                     logger.success(f"Built model {n_success} for segment {segment.identifier}")
 
             if segment.models:
-                model_structure_files = [s.structure_file for s in segment.models]
+                model_structure_files = [m.structure_file for m in segment.models]
+                joined_model_structure_file = self.output_directory / f"{segment.parent_structure_file.stem}_{segment.identifier}.cif"
                 join_segments(
                     model_structure_files,
-                    self.output_directory / f"{segment.parent_structure_file.stem}_{segment.identifier}.cif",
+                    joined_model_structure_file,
                 )
+                for model in segment.models:
+                    model.structure_file = joined_model_structure_file
                 for file in model_structure_files:
                     file.unlink(missing_ok=True)
 
