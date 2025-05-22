@@ -1,3 +1,5 @@
+from collections.abc import Sequence
+
 import gemmi
 
 from loopbuilder.typing import StrPath
@@ -25,7 +27,7 @@ def extract_segment_from_mmcif(
     doc = gemmi.cif.read(str(input_file))
     block = doc[0]
 
-    table = block.find("_atom_site.", ['label_asym_id', 'label_seq_id'])
+    table = block.find("_atom_site.", ["label_asym_id", "label_seq_id"])
 
     # NOTE: Cannot iterate over table and delete rows at the same time
     keep_rows = []
@@ -33,18 +35,19 @@ def extract_segment_from_mmcif(
         if (row[0] == chain_id) and (int(row[1]) in residue_indices):
             keep_rows.append(row.row_index)
 
+    n_rows = len(table)
     start, end = min(keep_rows), max(keep_rows)
     if start > 0:
         del table[:start]
-    if end < len(table) - 1:
+    if end < n_rows - 1:
         # NOTE: Deleting rows shifts row indices, so subtract `start` from `end`
-        del table[end - start + 1:]
+        del table[end - start + 1 :]
 
     doc.write_file(str(output_file))
 
 
 def join_segments(
-    input_files: list[StrPath],
+    input_files: Sequence[StrPath],
     output_file: StrPath,
 ) -> None:
     """Join multiple CIF files into a single CIF file with multiple models
@@ -54,8 +57,8 @@ def join_segments(
         problem, a `gemmi`-based solution should be revisited.
 
     Args:
-        input_files: List of paths to the input CIF files.
-        output_file: Path to the output CIF file.
+        input_files: Paths to the input CIF files
+        output_file: Path to the output CIF file
 
     Keyword args:
         chain_id: Chain ID to filter residues from

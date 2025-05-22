@@ -1,26 +1,45 @@
+import os
 import pathlib
 import tempfile
 from abc import ABC, abstractmethod
+from typing import Callable
+
+import pandas as pd
 from loguru import logger
 from openmm.app import PDBxFile
 from pdbfixer import PDBFixer
 from tqdm.auto import tqdm
 
+from loopbuilder.convert import extract_segment_from_mmcif, join_segments
 from loopbuilder.segment import Segment, SegmentModel
 from loopbuilder.score import Scorer, Filter
 from loopbuilder.typing import StrPath
 
 
 class Builder(ABC):
-    """Base class for loop builders"""
+    """Base class for loop builders
+
+    For concrete builders, it should normaly be sufficient to implement the
+    `build_segment` method. This should contain the logic for constructing
+    a single `SegmentModel` for a given `Segment`.
+
+    A default implementation of the higher order `build` method is provided,
+    This takes care of organizing the building process for multiple segments
+    and models (making calls to `build_segment`), also including filtering and scoring.
+
+    How missing segments are found in the first place is defined in `find_segments`.
+    Full control over these segments can alternatively be achieved through manipulation
+    of the `segments` attribute, which is a list of `Segment` objects. The `build` method
+    will call `find_segments` only if no segments are present.
+    """
 
     def __init__(
         self,
         structure_file: StrPath,
         output_directory: StrPath,
         working_directory: StrPath | None = None,
-        scorers: list[Scorer] | None = None,
-        filters: list[Filter] | None = None,
+        scorers: list[Scorer | Callable[[SegmentModel], None]] | None = None,
+        filters: list[Filter | Callable[[SegmentModel], bool]] | None = None,
         progress_bar: bool = True,
     ):
         """Initialize the builder
@@ -32,8 +51,8 @@ class Builder(ABC):
         Keyword args:
             working_directory: Path to a working directory. All trial models and intermediate files
                 will be saved here. If `None`, uses a temporary working directory.
-            scorers: List of scorers to use (optional)
-            filters: List of filters to use (optional)
+            scorers: List of scorers to use on generated segment models
+            filters: List of filters to use on generated segment models
             progress_bar: Show a progress bar for the model building process
         """
         if working_directory is not None:
@@ -49,7 +68,7 @@ class Builder(ABC):
     def find_segments(self) -> None:
         """Find missing segments in the input structure
 
-        NOTE: Uses PDBFixer at the moment but this part can also be
+        NOTE: Uses PDBFixer at the moment but this part could also be
             implemented for example in Biopython if needed.
 
         NOTE: Ignores missing terminal residues
@@ -71,13 +90,15 @@ class Builder(ABC):
 
             non_terminal[key] = value
 
-        for i, ((chain_index, residue_start_index), residue_names) in enumerate(non_terminal.items()):
+        for i, ((chain_index, residue_start_index), residue_names) in enumerate(non_terminal.items(), 1):
+            chain_residues = list(chains[chain_index].residues())
             segment = Segment(
                 identifier=f"loop_{i}",
                 chain_index=chain_index,
                 chain_name=chains[chain_index].id,
                 residue_start_index=residue_start_index,
-                residue_index_offset=int(next(chains[chain_index].residues()).id),
+                residue_start_seqid=int(chain_residues[residue_start_index - 1].id) + 1,
+                residue_index_offset=int(chain_residues[0].id),
                 residue_names=residue_names,
                 parent_structure_file=self.structure_file,
                 models=[],
@@ -105,6 +126,9 @@ class Builder(ABC):
             temp_dir = tempfile.TemporaryDirectory()
             working_directory = pathlib.Path(temp_dir.name)
 
+        # NOTE: Make sure the working directory is writable for other processes
+        os.chmod(working_directory, 0o777)
+
         if n < 1:
             logger.warning("Building 0 models. Exiting.")
             return
@@ -119,16 +143,17 @@ class Builder(ABC):
         logger.info(f"Building n={n} models for {self.structure_file} (max_tries={max_tries})")
         self.output_directory.mkdir(parents=True, exist_ok=True)
         logger.info(f"Saving output to {self.output_directory}")
+        logger.info(f"Using working directory {working_directory}")
 
         scorer_str = "\n".join([f"  {scorer!r}" for scorer in self.scorers])
         if scorer_str:
             scorer_str = ":\n" + scorer_str
-        logger.info(f"Using {len(self.scorers)} scorers{scorer_str}")
+        logger.info(f"Using {len(self.scorers)} scorer(s){scorer_str}")
 
         filter_str = "\n".join([f"  {filter!r}" for filter in self.filters])
         if filter_str:
             filter_str = ":\n" + filter_str
-        logger.info(f"Using {len(self.filters)} filters{filter_str}")
+        logger.info(f"Using {len(self.filters)} filter(s){filter_str}")
 
         if not self.segments:
             logger.info("Looking for segments")
@@ -159,24 +184,70 @@ class Builder(ABC):
                     logger.warning(f"Reached the maximum number of tries (success_rate={n_success / n_tries:.2%})")
                     break
 
-                segment_model = self.build_segment(segment, trial_id=str(n_tries), working_directory=working_directory)
                 n_tries += 1
+                segment_model = self.build_segment(segment, trial_id=str(n_tries), working_directory=working_directory)
+
+                segment_start = segment.residue_start_seqid
+                segment_end = segment_start + len(segment) - 1
+                model_structure_file = segment_model.structure_file.with_stem(f"{segment_model.structure_file.stem}_segment")
+                extract_segment_from_mmcif(
+                    segment_model.structure_file,
+                    model_structure_file,
+                    residue_indices={segment_start, segment_end},
+                    chain_id=segment.chain_name,
+                )
+                segment_model.structure_file = model_structure_file
 
                 for scorer in self.scorers:
-                    scorer.score(segment_model)
+                    scorer(segment_model)
 
-                for filter in self.filters:
-                    if not filter.filter(segment_model):
-                        continue
+                logger.info(f"Scored trial model {n_tries} for segment {segment.identifier}: {segment_model.scores}")
 
-                n_success += 1
-                model_structure_file = (
-                    self.output_directory / f"{segment.parent_structure_file.stem}_{segment.identifier}_{n_success}.cif"
+                for filter_ in self.filters:
+                    if not filter_(segment_model):
+                        logger.info(f"Trial model {n_tries} for segment {segment.identifier} failed filter {filter_}")
+                        break
+                else:
+                    n_success += 1
+                    model_structure_file = (
+                        self.output_directory / f"{segment.parent_structure_file.stem}_{segment.identifier}_{n_success}.cif"
+                    )
+                    segment_model.structure_file.rename(model_structure_file)
+                    segment_model.structure_file = model_structure_file
+                    segment_model.index = n_success
+                    segment.models.append(segment_model)
+                    logger.success(f"Built model {n_success} for segment {segment.identifier}")
+
+            if segment.models:
+                model_structure_files = [s.structure_file for s in segment.models]
+                join_segments(
+                    model_structure_files,
+                    self.output_directory / f"{segment.parent_structure_file.stem}_{segment.identifier}.cif",
                 )
-                segment_model.structure_file.rename(model_structure_file)
-                segment_model.structure_file = model_structure_file
-                segment.models.append(segment_model)
-                logger.success(f"Built model {n_success} for segment {segment.identifier}")
+                for file in model_structure_files:
+                    file.unlink(missing_ok=True)
+
+
+        segment_df = pd.DataFrame(
+            self.segments,
+            columns=[
+                "identifier",
+                "chain_index",
+                "chain_name",
+                "residue_start_index",
+                "residue_start_seqid",
+                "residue_index_offset",
+                "residue_names",
+                "parent_structure_file",
+            ],
+        )
+        segment_df.to_csv(self.output_directory / "segments.csv", index=False)
+
+        models = [m for segment in self.segments for m in segment.models]
+        model_df = pd.DataFrame(
+            models,
+        )
+        model_df.to_csv(self.output_directory / "models.csv", index=False)
 
         return self.segments
 
@@ -185,8 +256,8 @@ class Builder(ABC):
         """Build a model for a segment
 
         Args:
-            segment: `Segment` object to build a model for
-            trial_id: Trial ID for the model, used to generate a unique output filename
+            segment: `Segment` object for which to build a model
+            trial_id: Trial ID for the model, used to generate a unique (temporary) output filename
             working_directory: Path to a working directory. All trial models and intermediate files
                 will be saved here.
 
@@ -200,8 +271,10 @@ class PDBFixerBuilder(Builder):
         """Build a segment model using PDBFixer
 
         Args:
-            segment: `Segment` object to build a model for
-            trial_id: Trial ID for the model, used to generate a unique output filename
+            segment: `Segment` object for which to build a model
+            trial_id: Trial ID for the model, used to generate a unique (temporary) output filename
+            working_directory: Path to a working directory. All trial models and intermediate files
+                will be saved here.
 
         Returns:
             A `SegmentModel` object
@@ -217,6 +290,7 @@ class PDBFixerBuilder(Builder):
             working_directory / f"{segment.parent_structure_file.stem}_{segment.identifier}_{trial_id}.cif"
         )
         with open(model_structure_file, "w") as fp:
+            # NOTE: Write out full structure here for scoring. Segments will be split off later.
             PDBxFile.writeFile(fixer.topology, fixer.positions, file=fp, keepIds=True)
 
         return SegmentModel(identifier=segment.identifier, structure_file=model_structure_file, scores={})
