@@ -10,7 +10,7 @@ design principle follows a simple protocol:
   * Optionally, define the missing `Segment`s to be modelled or let the builder find them
   * Run `build` specifying a target number of `SegmentModels` to generate
     * The builder will try to generate models for each segment one after each other
-    * Optionally, `Scorer`s and `Filters` can be used to accept or reject models
+    * Optionally, `Scorer`s and `Filter`s can be used to accept or reject models
     * The successful models will be saved to PDBx/mmCIF files, one for each segment
     * A `segments.csv` file describes the modelled segments
     * A `models.csv` file describes the generated models including their scores
@@ -19,7 +19,7 @@ design principle follows a simple protocol:
 Example
 -------
 
-For a working example see the Jupyter notebook under `sandbox/PDBFixer/explore.ipynb`.
+For a working example see the Jupyter notebook under [sandbox/PDBFixer/explore.ipynb](sandbox/PDBFixer/explore.ipynb).
 
 Installation
 ------------
