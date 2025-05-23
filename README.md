@@ -19,7 +19,7 @@ design principle follows a simple protocol:
 Example
 -------
 
-For a working example see the Jupyter notebook under [sandbox/PDBFixer/explore.ipynb](sandbox/PDBFixer/explore.ipynb).
+For a working example see the Jupyter notebook under [sandbox/PDBFixer/explore.ipynb](https://github.com/janjoswig/LoopBuilder/blob/main/sandbox/explore.ipynb).
 
 Installation
 ------------
